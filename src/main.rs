@@ -1,176 +1,131 @@
-use std::env;
-use std::process;
-use std::collections::HashMap;
+use Error::*;
 
-struct State<'a> {
-    program: &'a str,
-    func: HashMap<char, String>,
-    pointer: usize,
-    args: Vec<usize>,
+#[derive(Debug)]
+enum Error {
+    InvalidChar { actual: char },
+    OutBound,
+    UnexpectedChar { actual: char },
+    UndefinedSymbol { actual: char },
+}
+
+struct Machine<'a> {
+    prog: &'a str,
+    funcmap: [Option<&'a str>; 28],
+}
+
+impl <'a> Machine<'a> {
+    fn eval(&mut self, args: &[isize]) -> Result<isize, Error> {
+        self.skip();
+
+        let c = self.peek(0)?;
+        match c {
+            'a'...'z' => {
+                self.seek(1);
+                Ok(*args.get((c as usize) - ('a' as usize)).ok_or_else(
+                    || UndefinedSymbol { actual: c })?)
+            },
+            'P' => {
+                self.seek(1);
+                self.expect('(')?;
+                self.seek(1);
+                self.skip();
+                let v = self.eval(args)?;
+                self.skip();
+                self.expect(')')?;
+                self.seek(1);
+                println!("{}", v);
+                Ok(v)
+            },
+            'A'...'Z' if self.peek(1)? == '[' => {
+                self.seek(2);
+                let n = self.prog.find(|c: char| c == ']').ok_or(OutBound)?;
+                self.funcmap[(c as usize) - ('A' as usize)] = Some(&self.prog[..n]);
+                self.seek(n + 1);
+                self.eval(args)
+            },
+            'A'...'Z' if self.peek(1)? == '(' => {
+                self.seek(2);
+
+                let f = self.funcmap[(c as usize) - ('A' as usize)]
+                    .ok_or_else(|| UndefinedSymbol { actual: c })?;
+
+                let mut new_args = [0; 28];
+                let mut i = 0;
+                self.skip();
+                while self.peek(0)? != ')' {
+                    new_args[i] = self.eval(args)?;
+                    i += 1;
+                    self.skip();
+                }
+                self.expect(')')?;
+                self.seek(1);
+
+                let old_prog = self.prog;
+                self.prog = f;
+                let mut r = self.eval(&new_args)?;
+                self.skip();
+                while !self.prog.is_empty() {
+                    r = self.eval(&new_args)?;
+                    self.skip();
+                }
+                self.prog = old_prog;
+                Ok(r)
+            },
+            '+' | '-' | '*' | '/' => {
+                self.seek(1);
+                let x = self.eval(args)?;
+                let y = self.eval(args)?;
+                Ok(match c {
+                    '+' => x + y,
+                    '-' => x - y,
+                    '*' => x * y,
+                    '/' => x / y,
+                    _ => unreachable!(),
+                })
+            },
+            '0'...'9' => {
+                let old_prog = self.prog;
+                while !self.prog.is_empty() && self.peek(0)?.is_digit(10) {
+                    self.seek(1);
+                }
+                Ok(old_prog[..(old_prog.len() - self.prog.len())].parse().unwrap())
+            },
+            _ => Err(InvalidChar { actual: c }),
+        }
+    }
+
+    fn peek(&self, n: usize) -> Result<char, Error> {
+        self.prog[n..].chars().next().ok_or(OutBound)
+    }
+
+    fn expect(&self, e: char) -> Result<(), Error> {
+        let c = self.peek(0)?;
+        if c != e {
+            Err(UnexpectedChar { actual: c  })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn seek(&mut self, n: usize) {
+        self.prog = &self.prog[n..];
+    }
+
+    fn skip(&mut self) {
+        self.prog = self.prog.trim_left();
+    }
 }
 
 fn main() {
-    let program = env::args().nth(1).expect("Missing argument");
-
-    let func = HashMap::new();
-    let args = Vec::new();
-    let mut state = State {
-        program: &program,
-        func: func,
-        pointer: 0,
-        args: args,
+    let mut m = Machine {
+        prog: &std::env::args().nth(1).unwrap_or_else(|| panic!("Missing argument")),
+        funcmap: [None; 28],
     };
-    println!("{:?}", eval(&mut state).0);
-}
-
-fn eval(state: &mut State) -> (usize, usize) {
-    let p = state.program.chars().nth(state.pointer).unwrap();
-    state.pointer += 1;
-
-    match p {
-        // skip space
-        _ if p.is_whitespace() => {
-            return eval(state);
+    while !m.prog.is_empty() {
+        match m.eval(&[]) {
+            Ok(v) => println!("{}", v),
+            Err(e) => panic!("{:?}", e),
         }
-        // Function parameter
-        'a'...'z' => {
-            // println!("args: {:?}", args);
-            return (state.args[p as usize - 'a' as usize], state.pointer);
-        }
-        'P' => {
-            if next(state) != '(' {
-                error(format!("expect: (, actual: {}", next(state)));
-            }
-            // '('
-            state.pointer += 1;
-            let (val, mut pointer) = eval(state);
-            println!("{}", val);
-            // ')'
-            pointer += 1;
-            return (val, pointer);
-        }
-        // Function definition
-        'A'...'Z' if next(state) == '[' => {
-            let func_name = p;
-            // '['
-            state.pointer += 1;
-            let mut func_string: String = "".to_string();
-            while state.program.chars().nth(state.pointer).unwrap() != ']' {
-                func_string.push(state.program.chars().nth(state.pointer).unwrap());
-                state.pointer += 1;
-            }
-            state.func.insert(func_name, func_string);
-            // ']'
-            state.pointer += 1;
-            return eval(state);
-        }
-        // Function application
-        'A'...'Z' if next(state) == '(' => {
-            let func_name = p;
-            // '('
-            state.pointer += 1;
-            let mut newargs = Vec::new();
-            while state.program.chars().nth(state.pointer).unwrap() != ')' {
-                if state
-                    .program
-                    .chars()
-                    .nth(state.pointer)
-                    .unwrap()
-                    .is_whitespace()
-                {
-                    state.pointer += 1;
-                    continue;
-                }
-                let result = eval(state);
-                newargs.push(result.0);
-                state.pointer = result.1;
-            }
-
-            let func_string = state.func.get(&func_name).unwrap();
-            let mut func_pointer = 0;
-            let mut val = 0;
-            while func_pointer <= func_string.len() - 1 {
-                let result = eval(&mut State {
-                    program: func_string,
-                    func: state.func.clone(),
-                    pointer: func_pointer,
-                    args: newargs.clone(),
-                });
-                val = result.0;
-                func_pointer = result.1;
-                while func_pointer <= func_string.len() - 1
-                    && func_string
-                        .chars()
-                        .nth(func_pointer)
-                        .unwrap()
-                        .is_whitespace()
-                {
-                    func_pointer += 1;
-                }
-            }
-            // ')'
-            state.pointer += 1;
-            return (val, state.pointer);
-        }
-        // Literal numbers
-        '0'...'9' => {
-            let mut val = p.to_digit(10).unwrap();
-            while state.pointer <= state.program.len() - 1
-                && state
-                    .program
-                    .chars()
-                    .nth(state.pointer)
-                    .unwrap()
-                    .is_digit(10)
-            {
-                val = val * 10
-                    + state
-                        .program
-                        .chars()
-                        .nth(state.pointer)
-                        .unwrap()
-                        .to_digit(10)
-                        .unwrap();
-                state.pointer += 1;
-            }
-            return (val as usize, state.pointer);
-        }
-        // arithmetic operators
-        '+' | '-' | '*' | '/' => {
-            let (x, pointer) = eval(state);
-            state.pointer = pointer;
-            let (y, pointer) = eval(state);
-            state.pointer = pointer;
-            let val = match p {
-                '+' => x + y,
-                '-' => x - y,
-                '*' => x * y,
-                '/' => x / y,
-                _ => error(format!("Invalid operator: {:?}", p)),
-            };
-            return (val, pointer);
-        }
-        _ => error(format!(
-            "Invalid character: {:?}, pointer: {:?}",
-            p, state.pointer
-        )),
-    };
-}
-
-fn error(error: String) -> ! {
-    eprintln!("{}", error);
-    process::exit(1);
-}
-fn _log(log: String) {
-    eprintln!("{}", log);
-}
-
-fn next(state: &State) -> char {
-    return state
-        .program
-        .get(state.pointer..state.pointer + 1)
-        .unwrap()
-        .chars()
-        .last()
-        .unwrap();
+        m.skip();
+    }
 }
